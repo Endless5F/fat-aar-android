@@ -1,5 +1,7 @@
 # fat-aar-android
 
+类似：https://github.com/SusionSuc/fat-aar-android 修复部分问题
+
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/aasitnikov/fat-aar-android/blob/master/LICENSE)
 [![JitPack](https://jitpack.io/v/aasitnikov/fat-aar-android.svg)](https://jitpack.io/#aasitnikov/fat-aar-android)
 
