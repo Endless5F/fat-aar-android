@@ -84,7 +84,7 @@ class VariantProcessor {
     }
 
     private static void printEmbedArtifacts(Collection<ResolvedArtifact> artifacts,
-                                     Collection<ResolvedDependency> dependencies) {
+                                            Collection<ResolvedDependency> dependencies) {
         Collection<String> moduleNames = artifacts.stream().map { it.moduleVersion.id.name }.collect()
         dependencies.each { dependency ->
             if (!moduleNames.contains(dependency.moduleName)) {
@@ -199,16 +199,16 @@ class VariantProcessor {
     private void transformRClasses(RClassesTransform transform, TaskProvider transformTask, TaskProvider bundleTask, TaskProvider reBundleTask) {
         transform.putTargetPackage(mVariant.name, mVariant.getApplicationId())
         transformTask.configure {
-                    doFirst {
-                        // library package name parsed by aar's AndroidManifest.xml
-                        // so must put after explode tasks perform.
-                        Collection libraryPackages = mAndroidArchiveLibraries
-                                .stream()
-                                .map { it.packageName }
-                                .collect()
-                        transform.putLibraryPackages(mVariant.name, libraryPackages);
-                    }
-                }
+            doFirst {
+                // library package name parsed by aar's AndroidManifest.xml
+                // so must put after explode tasks perform.
+                Collection libraryPackages = mAndroidArchiveLibraries
+                        .stream()
+                        .map { it.packageName }
+                        .collect()
+                transform.putLibraryPackages(mVariant.name, libraryPackages);
+            }
+        }
         bundleTask.configure {
             finalizedBy(reBundleTask)
         }
@@ -405,7 +405,13 @@ class VariantProcessor {
                 mProject.copy {
                     from outputDir
                     into javacDir
-                    exclude 'META-INF/'
+                    // 使用eachFile进行更精确的控制，保留META-INF/services目录
+                    eachFile { fileCopyDetails ->
+                        if (fileCopyDetails.path.startsWith('META-INF/') &&
+                                !fileCopyDetails.path.startsWith('META-INF/services/')) {
+                            fileCopyDetails.exclude()
+                        }
+                    }
                 }
 
                 mProject.copy {
@@ -497,6 +503,10 @@ class VariantProcessor {
         resourceGenTask.configure {
             dependsOn(mExplodeTasks)
         }
+
+        // Add resource processing
+        ResourceProcessor processor = new ResourceProcessor(mProject, mVariant)
+        processor.processResources()
 
         for (archiveLibrary in mAndroidArchiveLibraries) {
             FatUtils.logInfo("Merge resource，Library res：${archiveLibrary.resFolder}")
@@ -629,17 +639,79 @@ class VariantProcessor {
     }
 
     private TaskProvider createShadowClassJarTask(final TaskProvider syncLibTask) {
-        TaskProvider task = mProject.tasks.register("shadowClassesJar" + mVariant.name.capitalize(), ShadowJar) {
+        TaskProvider mergeServiceTask = mProject.tasks.register("merge${mVariant.name.capitalize()}ServicesIntoJar") {
             dependsOn(mExplodeTasks)
             dependsOn(mVersionAdapter.getJavaCompileTask())
             mustRunAfter(syncLibTask)
+
+            doLast {
+                def classesJar = mVersionAdapter.getClassesJarFile()
+                File outputDir = DirectoryManager.getMergeClassDirectory(mVariant)
+                File servicesDir = new File(outputDir, "META-INF/services")
+
+                if (!classesJar.exists()) {
+                    FatUtils.logError("Cannot find classes.jar for merging META-INF/services")
+                    return
+                }
+
+                if (!servicesDir.exists() || !servicesDir.isDirectory() || servicesDir.listFiles().length == 0) {
+                    FatUtils.logInfo("No META-INF/services found or it's empty, using original classes.jar")
+                    return
+                }
+
+                FatUtils.logInfo("Merging META-INF/services into classes.jar")
+
+                // 创建临时目录
+                File tempDir = new File(mProject.buildDir, "tmp/mergeClassesJar/${mVariant.name}")
+                tempDir.deleteDir()
+                tempDir.mkdirs()
+
+                // 解压classes.jar到临时目录
+                mProject.copy {
+                    from mProject.zipTree(classesJar)
+                    into tempDir
+                }
+
+                // 确保META-INF/services目录存在
+                File tempServicesDir = new File(tempDir, "META-INF/services")
+                tempServicesDir.mkdirs()
+
+                // 复制services文件
+                mProject.copy {
+                    from servicesDir
+                    into tempServicesDir
+                }
+
+                // 备份原始classes.jar
+                File backupJar = new File(classesJar.parentFile, "classes.jar.bak")
+                if (backupJar.exists()) {
+                    backupJar.delete()
+                }
+                classesJar.renameTo(backupJar)
+
+                // 重新打包classes.jar
+                mProject.ant.zip(destfile: classesJar) {
+                    fileset(dir: tempDir)
+                }
+
+                FatUtils.logInfo("Successfully merged META-INF/services into classes.jar")
+
+                // 删除备份和临时目录
+                backupJar.delete()
+                tempDir.deleteDir()
+            }
+        }
+
+        TaskProvider task = mProject.tasks.register("shadowClassesJar" + mVariant.name.capitalize(), ShadowJar) {
+            dependsOn(mergeServiceTask)
+
             doFirst {
                 def classesJar = mVersionAdapter.getClassesJarFile()
                 if (classesJar.exists()) {
-                    it.from(classesJar)
+                    from(classesJar)
                     mProject.fataar.shadowPaths.each { key, value ->
                         FatUtils.logInfo("shadow path: key = " + key + ", value = " + value)
-                        it.relocate(key, value)
+                        relocate(key, value)
                     }
                 } else {
                     FatUtils.logError("Can not find classes.jar, check the file path of the classes.jar file based on the AGP version!")
@@ -721,5 +793,4 @@ class VariantProcessor {
 
         return task
     }
-
 }
